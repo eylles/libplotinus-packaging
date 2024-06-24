@@ -1,0 +1,10 @@
+Description: Add gtk module to environment
+Author: Felipe Morales <hel.sheep@gmail.com>
+Forwarded: not-needed
+Last-Update: 2022-08-01
+
+--- /dev/null
++++ b/profile/plotinus.in
+@@ -0,0 +1,16 @@
++# Set the GTK_MODULES env variable to load libplotinus
++export GTK3_MODULES="${GTK3_MODULES:+$GTK3_MODULES:}/usr/lib/deb-arch/libplotinus.so"

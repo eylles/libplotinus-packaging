@@ -1,0 +1,669 @@
+Description: [PATCH] Add D-Bus API
+Author: Philipp Emanuel Weidmann <pew@worldwidemann.com>
+Forwarded: not-needed
+Last-Update: 2017-06-04
+
+---
+ CMakeLists.txt                              |  15 +-
+ README.md                                   | 123 ++++++++++++-
+ data/com.worldwidemann.plotinus.gschema.xml |   4 +
+ src/Command.vala                            |  41 +++--
+ src/CommandList.vala                        |   2 +-
+ src/Keybinder.vala                          |  12 +-
+ src/Module.vala                             |  43 +++--
+ src/PopupWindow.vala                        |   2 -
+ src/Service.vala                            | 189 ++++++++++++++++++++
+ src/Utilities.vala                          |  11 ++
+ 10 files changed, 400 insertions(+), 42 deletions(-)
+ create mode 100644 src/Service.vala
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4fb9312..89e104e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -4,8 +4,6 @@ cmake_minimum_required(VERSION 2.8)
+ 
+ list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+ 
+-set(LIB_NAME ${CMAKE_PROJECT_NAME})
+-
+ find_package(PkgConfig)
+ 
+ pkg_check_modules(DEPS REQUIRED
+@@ -20,7 +18,7 @@ include(ValaVersion)
+ ensure_vala_version("0.26" MINIMUM)
+ 
+ include(ValaPrecompile)
+-vala_precompile(VALA_C ${LIB_NAME}
++vala_precompile(VALA_C ${CMAKE_PROJECT_NAME}
+   src/Command.vala
+   src/CommandExtractor.vala
+   src/CommandList.vala
+@@ -28,6 +26,7 @@ vala_precompile(VALA_C ${LIB_NAME}
+   src/Keybinder.vala
+   src/Module.vala
+   src/PopupWindow.vala
++  src/Service.vala
+   src/Utilities.vala
+ PACKAGES
+   gtk+-3.0>=3.16
+@@ -37,5 +36,11 @@ PACKAGES
+ include(GSettings)
+ add_schema(data/com.worldwidemann.plotinus.gschema.xml)
+ 
+-add_library(${LIB_NAME} SHARED ${VALA_C})
+-install(TARGETS ${LIB_NAME} LIBRARY DESTINATION lib)
++add_executable(dbus_service ${VALA_C})
++add_library(gtk_module SHARED ${VALA_C})
++
++set_target_properties(dbus_service gtk_module PROPERTIES OUTPUT_NAME ${CMAKE_PROJECT_NAME})
++
++install(TARGETS dbus_service gtk_module
++        RUNTIME DESTINATION bin
++        LIBRARY DESTINATION lib)
+diff --git a/README.md b/README.md
+index abf1802..c22a892 100644
+--- a/README.md
++++ b/README.md
+@@ -84,7 +84,7 @@ Plotinus can be configured both globally and per application. Application settin
+ 
+ Note that the relevant path is the path of the *process executable*, which is not always identical to the executable being launched. For example, all GNOME JavaScript applications run the process `/usr/bin/gjs`.
+ 
+-### Enabling/disabling Plotinus
++### Enabling/disabling the command palette
+ 
+ ```
+ gsettings set com.worldwidemann.plotinus:/com/worldwidemann/plotinus/[application]/ enabled [true/false]
+@@ -96,7 +96,126 @@ gsettings set com.worldwidemann.plotinus:/com/worldwidemann/plotinus/[applicatio
+ gsettings set com.worldwidemann.plotinus:/com/worldwidemann/plotinus/[application]/ hotkeys '[keys]'
+ ```
+ 
+-`[keys]` must be an array of strings in the format expected by [`gtk_accelerator_parse`](https://developer.gnome.org/gtk3/stable/gtk3-Keyboard-Accelerators.html#gtk-accelerator-parse), e.g. `["<Primary><Shift>P", "<Primary>P"]`. Each shortcut in the array activates Plotinus.
++`[keys]` must be an array of strings in the format expected by [`gtk_accelerator_parse`](https://developer.gnome.org/gtk3/stable/gtk3-Keyboard-Accelerators.html#gtk-accelerator-parse), e.g. `["<Primary><Shift>P", "<Primary>P"]`. Each shortcut in the array opens the command palette.
++
++### Enabling/disabling D-Bus window registration
++
++```
++gsettings set com.worldwidemann.plotinus:/com/worldwidemann/plotinus/[application]/ dbus-enabled [true/false]
++```
++
++See the following section for details.
++
++
++## D-Bus API
++
++Plotinus provides a simple but complete [D-Bus](https://www.freedesktop.org/wiki/Software/dbus/) API for developers who want to use its functionality from their own software. The API consists of two methods, exposed on the session bus at `com.worldwidemann.plotinus`:
++
++* `GetCommands(window_path) -> (bus_name, command_paths)`<br>Takes the object path of a GTK+ window (which can e.g. be obtained from a Mutter window via [`meta_window_get_gtk_window_object_path`](https://developer.gnome.org/meta/stable/MetaWindow.html#meta-window-get-gtk-window-object-path)) and returns an array of object paths referencing commands extracted from that window, as well as the name of the bus on which they are registered.<br>The mechanism behind this method is somewhat similar to [Ubuntu's AppMenu Registrar](https://github.com/tetzank/qmenu_hud/blob/master/com.canonical.AppMenu.Registrar.xml), but more lightweight and compatible with Wayland. Window registration [must be enabled](#enablingdisabling-dbus-window-registration) before using this method.
++
++* `ShowCommandPalette(commands) -> (bus_name, command_palette_path)`<br>Takes an array of commands (structs of the form `(path, label, accelerators)`) and opens a command palette window displaying those commands. The returned object path references a control object registered on the returned bus name which provides signals on user interaction with the window.
++
++Calls to these methods are processed by the **Plotinus D-Bus service,** which can be started with
++
++```
++plotinus
++```
++
++### Examples
++
++The following examples demonstrate how to use the D-Bus API from Python. They require [pydbus](https://github.com/LEW21/pydbus) to be installed and the Plotinus D-Bus service to be running.
++
++#### Application remote control
++
++```python
++#!/usr/bin/env python
++
++import sys
++from pydbus import SessionBus
++
++bus = SessionBus()
++plotinus = bus.get("com.worldwidemann.plotinus")
++
++bus_name, command_paths = plotinus.GetCommands(sys.argv[1])
++commands = [bus.get(bus_name, command_path) for command_path in command_paths]
++
++for i, command in enumerate(commands):
++  print("[%d] %s -> %s" % (i, " -> ".join(command.Path), command.Label))
++
++index = raw_input("Number of command to execute: ")
++
++if index:
++  commands[int(index)].Execute()
++```
++
++Before running this example, enable window registration with
++
++```
++gsettings set com.worldwidemann.plotinus:/com/worldwidemann/plotinus/default/ dbus-enabled true
++```
++
++Then, run an application (e.g. gedit) with [Plotinus enabled](#enabling-plotinus-in-applications). Now run the script with the window object path as an argument, i.e.
++
++```
++./application_remote_control.py /org/gnome/gedit/window/1
++```
++
++#### Application launcher
++
++Based on [this Argos plugin](https://github.com/p-e-w/argos#launcherpy), uses Plotinus' command palette to display a list of applications available on the system.
++
++```python
++#!/usr/bin/env python
++
++import os, re
++from pydbus import SessionBus
++from gi.repository import GLib, Gio
++
++applications = {}
++
++for app_info in Gio.AppInfo.get_all():
++  categories = app_info.get_categories()
++  if categories is None:
++    continue
++  # Remove "%U" and "%F" placeholders
++  command_line = re.sub("%\\w", "", app_info.get_commandline()).strip()
++  app = (app_info.get_name(), command_line)
++  for category in categories.split(";"):
++    if category not in ["GNOME", "GTK", ""]:
++      if category not in applications:
++        applications[category] = []
++      applications[category].append(app)
++      break
++
++commands = []
++command_lines = []
++
++for category, apps in sorted(applications.items()):
++  for app in sorted(apps):
++    commands.append(([category], app[0], []))
++    command_lines.append(app[1])
++
++bus = SessionBus()
++plotinus = bus.get("com.worldwidemann.plotinus")
++
++bus_name, command_palette_path = plotinus.ShowCommandPalette(commands)
++command_palette = bus.get(bus_name, command_palette_path)
++
++loop = GLib.MainLoop()
++
++def command_executed(index):
++  os.system(command_lines[index])
++
++command_palette.CommandExecuted.connect(command_executed)
++
++def closed():
++  # Wait for CommandExecuted signal
++  GLib.timeout_add(500, loop.quit)
++
++command_palette.Closed.connect(closed)
++
++loop.run()
++```
+ 
+ 
+ ## Acknowledgments
+diff --git a/data/com.worldwidemann.plotinus.gschema.xml b/data/com.worldwidemann.plotinus.gschema.xml
+index 7a35996..6678b0e 100644
+--- a/data/com.worldwidemann.plotinus.gschema.xml
++++ b/data/com.worldwidemann.plotinus.gschema.xml
+@@ -6,6 +6,10 @@
+       <default>true</default>
+     </key>
+ 
++    <key name="dbus-enabled" type="b">
++      <default>false</default>
++    </key>
++
+     <key name="hotkeys" type="as">
+       <default><![CDATA[ ["<Primary><Shift>P"] ]]></default>
+     </key>
+diff --git a/src/Command.vala b/src/Command.vala
+index 1ed802d..9b7f7ab 100644
+--- a/src/Command.vala
++++ b/src/Command.vala
+@@ -11,6 +11,7 @@
+ 
+ namespace Plotinus {
+ 
++  [DBus(name="com.worldwidemann.plotinus.Command")]
+   abstract class Command : Object {
+     private static int next_id = 0;
+ 
+@@ -19,55 +20,67 @@ namespace Plotinus {
+     public string label { get; private set; }
+     public string[] accelerators { get; private set; }
+ 
+-    public abstract void execute();
+-
+     protected Command(string[] path, string label, string[] accelerators) {
+       id = next_id++;
+       this.path = path;
+       this.label = label;
+       this.accelerators = accelerators;
+     }
++
++    public abstract void execute();
+   }
+ 
+-  class ActionCommand : Command {
+-    private Action action;
+-    private Variant? parameter;
++  class SignalCommand : Command {
++    public SignalCommand(string[] path, string label, string[] accelerators) {
++      base(path, label, accelerators);
++    }
+ 
+     public override void execute() {
+-      action.activate(parameter);
++      executed();
+     }
+ 
++    public signal void executed();
++  }
++
++  class ActionCommand : Command {
++    private Action action;
++    private Variant? parameter;
++
+     public ActionCommand(string[] path, string label, string[] accelerators, Action action, Variant? parameter) {
+       base(path, label, accelerators);
+       this.action = action;
+       this.parameter = parameter;
+     }
++
++    public override void execute() {
++      action.activate(parameter);
++    }
+   }
+ 
+   class MenuItemCommand : Command {
+     private Gtk.MenuItem menu_item;
+ 
+-    public override void execute() {
+-      menu_item.activate();
+-    }
+-
+     public MenuItemCommand(string[] path, string label, string[] accelerators, Gtk.MenuItem menu_item) {
+       base(path, label, accelerators);
+       this.menu_item = menu_item;
+     }
++
++    public override void execute() {
++      menu_item.activate();
++    }
+   }
+ 
+   class ButtonCommand : Command {
+     private Gtk.Button button;
+ 
+-    public override void execute() {
+-      button.clicked();
+-    }
+-
+     public ButtonCommand(string[] path, string label, string[] accelerators, Gtk.Button button) {
+       base(path, label, accelerators);
+       this.button = button;
+     }
++
++    public override void execute() {
++      button.clicked();
++    }
+   }
+ 
+ }
+diff --git a/src/CommandList.vala b/src/CommandList.vala
+index 93948db..b192f93 100644
+--- a/src/CommandList.vala
++++ b/src/CommandList.vala
+@@ -32,7 +32,7 @@ class Plotinus.CommandList : Gtk.TreeView {
+     }
+   }
+ 
+-  private static const string COLUMN_PADDING = "  ";
++  private const string COLUMN_PADDING = "  ";
+ 
+   private string filter = "";
+   private string[] filter_words = {};
+diff --git a/src/Keybinder.vala b/src/Keybinder.vala
+index 71caa84..f808a66 100644
+--- a/src/Keybinder.vala
++++ b/src/Keybinder.vala
+@@ -9,6 +9,8 @@
+  * (https://gnu.org/licenses/gpl.html)
+  */
+ 
++using Plotinus.Utilities;
++
+ namespace Plotinus {
+ 
+   interface Keybinder : Object {
+@@ -17,7 +19,7 @@ namespace Plotinus {
+   }
+ 
+   class ApplicationKeybinder : Object, Keybinder {
+-    private static const string ACTION_NAME = "activate-plotinus";
++    private const string ACTION_NAME = "activate-plotinus";
+ 
+     private Gtk.Application application;
+ 
+@@ -51,13 +53,7 @@ namespace Plotinus {
+       ulong[] handler_ids = {};
+ 
+       Timeout.add(SCAN_INTERVAL, () => {
+-        Gtk.Window[] windows = {};
+-        Gtk.Window.list_toplevels().foreach((window) => {
+-          if (!(window is PopupWindow) && window.type == Gtk.WindowType.TOPLEVEL && window.is_visible())
+-            windows += window;
+-        });
+-
+-        foreach (var window in windows) {
++        foreach (var window in get_windows()) {
+           bool handler_installed = false;
+           foreach (var handler_id in handler_ids) {
+             if (SignalHandler.is_connected(window, handler_id)) {
+diff --git a/src/Module.vala b/src/Module.vala
+index 78be9bb..f4d13b5 100644
+--- a/src/Module.vala
++++ b/src/Module.vala
+@@ -9,6 +9,8 @@
+  * (https://gnu.org/licenses/gpl.html)
+  */
+ 
++using Plotinus.Utilities;
++
+ // The module shares its global namespace with the host application,
+ // so all code should reside in a private namespace
+ namespace Plotinus {
+@@ -17,7 +19,7 @@ namespace Plotinus {
+ 
+   // Method signature adapted from https://github.com/gnome-globalmenu/gnome-globalmenu
+   [CCode(cname="gtk_module_init")]
+-  public void gtk_module_init([CCode(array_length_pos=0.9)] ref unowned string[] argv) {
++  void gtk_module_init([CCode(array_length_pos=0.9)] ref unowned string[] argv) {
+     Gtk.init(ref argv);
+ 
+     // See http://stackoverflow.com/a/606057
+@@ -26,7 +28,10 @@ namespace Plotinus {
+     var instance_name = executable_path.substring(1).replace("/", ".");
+     var settings = new InstanceSettings("com.worldwidemann.plotinus", "default", instance_name);
+ 
+-    if (!settings.get_value("enabled").get_boolean())
++    var enabled = settings.get_value("enabled").get_boolean();
++    var dbus_enabled = settings.get_value("dbus-enabled").get_boolean();
++
++    if (!(enabled || dbus_enabled))
+       return;
+ 
+     Timeout.add(SCAN_INTERVAL, () => {
+@@ -63,17 +68,35 @@ namespace Plotinus {
+       }
+ 
+       if (keybinder != null && command_extractor != null) {
+-        keybinder.keys_pressed.connect((window) => {
+-          var commands = command_extractor.get_window_commands(window);
++        if (enabled) {
++          keybinder.keys_pressed.connect((window) => {
++            var commands = command_extractor.get_window_commands(window);
++
++            if (commands.length > 0) {
++              var popup_window = new PopupWindow(commands);
++              popup_window.transient_for = window;
++              popup_window.show_all();
++            }
++          });
++
++          keybinder.set_keys(settings.get_value("hotkeys").dup_strv());
++        }
+ 
+-          if (commands.length > 0) {
+-            var popup_window = new PopupWindow(commands);
+-            popup_window.transient_for = window;
+-            popup_window.show_all();
++        if (dbus_enabled && application != null) {
++          var service_client = new ServiceClient(application, command_extractor);
++
++          foreach (var window in get_windows()) {
++            service_client.register_window(window);
+           }
+-        });
+ 
+-        keybinder.set_keys(settings.get_value("hotkeys").dup_strv());
++          application.window_added.connect((window) => {
++            service_client.register_window(window);
++          });
++
++          application.window_removed.connect((window) => {
++            service_client.unregister_window(window);
++          });
++        }
+ 
+         return false;
+       }
+diff --git a/src/PopupWindow.vala b/src/PopupWindow.vala
+index 54a28cb..7ae29b3 100644
+--- a/src/PopupWindow.vala
++++ b/src/PopupWindow.vala
+@@ -9,8 +9,6 @@
+  * (https://gnu.org/licenses/gpl.html)
+  */
+ 
+-using Plotinus.Utilities;
+-
+ class Plotinus.PopupWindow : Gtk.Window {
+ 
+   public PopupWindow(Command[] commands) {
+diff --git a/src/Service.vala b/src/Service.vala
+new file mode 100644
+index 0000000..bf8fbb2
+--- /dev/null
++++ b/src/Service.vala
+@@ -0,0 +1,189 @@
++/*
++ * Plotinus - A searchable command palette in every modern GTK+ application
++ *
++ * Copyright (c) 2016-2017 Philipp Emanuel Weidmann <pew@worldwidemann.com>
++ *
++ * Nemo vir est qui mundum non reddat meliorem.
++ *
++ * Released under the terms of the GNU General Public License, version 3
++ * (https://gnu.org/licenses/gpl.html)
++ */
++
++namespace Plotinus {
++
++  void main(string[] argv) {
++    Gtk.init(ref argv);
++
++    Bus.own_name(BusType.SESSION, "com.worldwidemann.plotinus", BusNameOwnerFlags.NONE,
++        (connection) => connection.register_object("/com/worldwidemann/plotinus", new Service(connection)));
++
++    Gtk.main();
++  }
++
++  [DBus(name="com.worldwidemann.plotinus")]
++  class Service : Object, ServiceProxy {
++    private DBusConnection connection;
++
++    private HashTable<string, CommandProviderProxy> command_providers =
++        new HashTable<string, CommandProviderProxy>(str_hash, str_equal);
++
++    public Service(DBusConnection connection) {
++      this.connection = connection;
++    }
++
++    public void get_commands(ObjectPath window_path, out string bus_name, out ObjectPath[] command_paths) {
++      if (command_providers.contains(window_path)) {
++        command_providers.get(window_path).get_commands(out bus_name, out command_paths);
++      } else {
++        // Returning null here instead of an empty string leads to a segmentation fault
++        bus_name = "";
++        command_paths = {};
++      }
++    }
++
++    public void register_window(ObjectPath window_path, string bus_name, ObjectPath command_provider_path) {
++      // Using get_proxy_sync here leads to a deadlock
++      Bus.get_proxy.begin<CommandProviderProxy>(BusType.SESSION, bus_name, command_provider_path,
++          DBusProxyFlags.NONE, null, (source_object, result) => {
++        CommandProviderProxy command_provider = Bus.get_proxy.end(result);
++        command_providers.replace(window_path, command_provider);
++      });
++    }
++
++    public void unregister_window(ObjectPath window_path) {
++      command_providers.remove(window_path);
++    }
++
++    public void show_command_palette(CommandStruct[] commands,
++        out string bus_name, out ObjectPath command_palette_path) {
++      bus_name = connection.unique_name;
++      command_palette_path =
++          new ObjectPath("/com/worldwidemann/plotinus/CommandPalette/%s".printf(DBus.generate_guid()));
++      connection.register_object(command_palette_path, new CommandPalette(commands));
++    }
++  }
++
++  [DBus(name="com.worldwidemann.plotinus")]
++  interface ServiceProxy : Object {
++    public abstract void get_commands(ObjectPath window_path, out string bus_name, out ObjectPath[] command_paths);
++    public abstract void register_window(ObjectPath window_path, string bus_name, ObjectPath command_provider_path);
++    public abstract void unregister_window(ObjectPath window_path);
++    public abstract void show_command_palette(CommandStruct[] commands,
++        out string bus_name, out ObjectPath command_palette_path);
++  }
++
++  [DBus(name="com.worldwidemann.plotinus.CommandProvider")]
++  class CommandProvider : Object, CommandProviderProxy {
++    private DBusConnection connection;
++    private CommandExtractor command_extractor;
++    private Gtk.Window window;
++
++    public CommandProvider(DBusConnection connection, CommandExtractor command_extractor, Gtk.Window window) {
++      this.connection = connection;
++      this.command_extractor = command_extractor;
++      this.window = window;
++    }
++
++    public void get_commands(out string bus_name, out ObjectPath[] command_paths) {
++      ObjectPath[] command_paths_builder = {};
++
++      foreach (var command in command_extractor.get_window_commands(window)) {
++        var command_path = new ObjectPath("/com/worldwidemann/plotinus/Command/%s".printf(DBus.generate_guid()));
++        connection.register_object(command_path, command);
++        command_paths_builder += command_path;
++      }
++
++      bus_name = connection.unique_name;
++      command_paths = command_paths_builder;
++    }
++  }
++
++  [DBus(name="com.worldwidemann.plotinus.CommandProvider")]
++  interface CommandProviderProxy : Object {
++    public abstract void get_commands(out string bus_name, out ObjectPath[] command_paths);
++  }
++
++  struct CommandStruct {
++    public string[] path;
++    public string label;
++    public string[] accelerators;
++  }
++
++  [DBus(name="com.worldwidemann.plotinus.CommandPalette")]
++  class CommandPalette : Object {
++    private PopupWindow popup_window;
++
++    public CommandPalette(CommandStruct[] commands) {
++      Command[] command_objects = {};
++
++      for (var i = 0; i < commands.length; i++) {
++        var command = commands[i];
++        var command_object = new SignalCommand(command.path, command.label, command.accelerators);
++
++        var index = i;
++        command_object.executed.connect(() => command_executed(index));
++
++        command_objects += command_object;
++      }
++
++      popup_window = new PopupWindow(command_objects);
++      popup_window.destroy.connect(() => closed());
++      popup_window.show_all();
++    }
++
++    public void close() {
++      popup_window.destroy();
++    }
++
++    public signal void closed();
++
++    public signal void command_executed(int index);
++  }
++
++  class ServiceClient : Object {
++    private Gtk.Application application;
++    private CommandExtractor command_extractor;
++    private DBusConnection connection;
++    private ServiceProxy service;
++
++    public ServiceClient(Gtk.Application application, CommandExtractor command_extractor) {
++      this.application = application;
++      this.command_extractor = command_extractor;
++      connection = Bus.get_sync(BusType.SESSION);
++      service = Bus.get_proxy_sync(BusType.SESSION, "com.worldwidemann.plotinus", "/com/worldwidemann/plotinus");
++    }
++
++    public void register_window(Gtk.Window window) {
++      var window_path = get_window_path(window);
++      if (window_path == null)
++        return;
++
++      var command_provider = new CommandProvider(connection, command_extractor, window);
++      var command_provider_path = new ObjectPath(
++          "/com/worldwidemann/plotinus/CommandProvider/%s".printf(DBus.generate_guid()));
++
++      connection.register_object(command_provider_path, command_provider);
++
++      service.register_window(window_path, connection.unique_name, command_provider_path);
++    }
++
++    public void unregister_window(Gtk.Window window) {
++      var window_path = get_window_path(window);
++      if (window_path == null)
++        return;
++
++      service.unregister_window(window_path);
++    }
++
++    private ObjectPath? get_window_path(Gtk.Window window) {
++      var application_window = window as Gtk.ApplicationWindow;
++      if (application_window == null)
++        return null;
++
++      // Default D-Bus window path assigned to ApplicationWindows
++      // (see gtkapplication-dbus.c in the GTK+ source code)
++      return new ObjectPath("%s/window/%u".printf(application.get_dbus_object_path(), application_window.get_id()));
++    }
++  }
++
++}
+diff --git a/src/Utilities.vala b/src/Utilities.vala
+index 1bb4d69..8c18a20 100644
+--- a/src/Utilities.vala
++++ b/src/Utilities.vala
+@@ -157,4 +157,15 @@ namespace Plotinus.Utilities {
+     return window.title;
+   }
+ 
++  Gtk.Window[] get_windows() {
++    Gtk.Window[] windows = {};
++
++    Gtk.Window.list_toplevels().foreach((window) => {
++      if (!(window is PopupWindow) && window.type == Gtk.WindowType.TOPLEVEL && window.is_visible())
++        windows += window;
++    });
++
++    return windows;
++  }
++
+ }
